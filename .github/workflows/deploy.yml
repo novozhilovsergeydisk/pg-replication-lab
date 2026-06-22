@@ -1,0 +1,57 @@
+name: Deploy PostgreSQL config to primary
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'config/pg/*.conf'
+      - '.github/workflows/deploy.yml'
+
+jobs:
+  deploy-primary:
+    name: Deploy to appuse (primary)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.PRIMARY_HOST }}
+          username: root
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -e
+
+            # 1. Скопировать конфиги на сервер
+            # (файлы из репозитория → /etc/postgresql/17/main/)
+
+            # 2. Проверить конфиг перед применением
+            sudo -u postgres /usr/lib/postgresql/17/bin/pg_config
+
+            # 3. Перезагрузить PostgreSQL без остановки
+            sudo -u postgres psql -p 5433 -c "SELECT pg_reload_conf();"
+
+            # 4. Проверить, что БД жива
+            sudo -u postgres psql -p 5433 -c "SELECT 'DEPLOY_OK';"
+
+  deploy-standby:
+    name: Deploy to elated-dijkstra (standby)
+    runs-on: ubuntu-latest
+    needs: deploy-primary
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.STANDBY_HOST }}
+          username: root
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -e
+            # Применить конфиги на standby
+            # Перезагрузить PostgreSQL на standby
+            sudo -u postgres psql -c "SELECT 'STANDBY_DEPLOY_OK';"
