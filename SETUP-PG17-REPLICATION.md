@@ -177,6 +177,105 @@ ssh elated-dijkstra "sudo -u postgres psql -p 5432 -d postgres -c \"SELECT * FRO
 
 ---
 
+---
+
+## 7. Полная перестройка standby (имитация сбоя и восстановление)
+
+Сценарий: standby PG 17 сломался → удаляем → заново получаем данные с
+appuse → запускаем репликацию. Все команды выполняются **с вашего Мака**.
+
+### 7.1. Остановить кластер PG 17 на standby
+
+```bash
+ssh elated-dijkstra 'pg_ctlcluster 17 main stop && pg_lsclusters'
+```
+
+Ожидаемый вывод: `17  main    5432 down postgres ...`
+
+### 7.2. Удалить каталог с данными
+
+```bash
+ssh elated-dijkstra 'rm -rf /var/lib/postgresql/17/main && echo "DATA DELETED"'
+```
+
+### 7.3. Создать пустой каталог
+
+```bash
+ssh elated-dijkstra 'mkdir -p /var/lib/postgresql/17/main && chown postgres:postgres /var/lib/postgresql/17/main && echo "DIR CREATED"'
+```
+
+### 7.4. Проверить, что туннель работает
+
+Порт 5434 должен слушаться на elated-dijkstra:
+
+```bash
+ssh elated-dijkstra 'ss -tlnp | grep 5434'
+```
+
+Если нет — запустить туннель:
+```bash
+ssh elated-dijkstra 'systemctl start pg-tunnel && sleep 2 && ss -tlnp | grep 5434'
+```
+
+### 7.5. Снять свежий pg_basebackup с appuse через туннель
+
+```bash
+ssh elated-dijkstra "sudo -u postgres PGPASSWORD='НАДЁЖНЫЙ_ПАРОЛЬ' pg_basebackup \
+  -h localhost -p 5434 -U replicator_17 \
+  -D /var/lib/postgresql/17/main -P -v --wal-method=stream"
+```
+
+### 7.6. Поправить права
+
+```bash
+ssh elated-dijkstra 'chmod 0700 /var/lib/postgresql/17/main && chown -R postgres:postgres /var/lib/postgresql/17/main'
+```
+
+### 7.7. Создать сигнальный файл standby
+
+```bash
+ssh elated-dijkstra 'touch /var/lib/postgresql/17/main/standby.signal && chown postgres:postgres /var/lib/postgresql/17/main/standby.signal'
+```
+
+### 7.8. Убедиться, что конфиг standby.conf существует
+
+```bash
+ssh elated-dijkstra 'cat /etc/postgresql/17/main/conf.d/standby.conf'
+```
+
+Должен содержать:
+```
+primary_conninfo = 'host=localhost port=5434 user=replicator_17 password=НАДЁЖНЫЙ_ПАРОЛЬ'
+hot_standby = on
+```
+
+Если файла нет — создать (см. раздел 5.2).
+
+### 7.9. Запустить standby
+
+```bash
+ssh elated-dijkstra 'pg_ctlcluster 17 main start && pg_lsclusters'
+```
+
+Ожидаемый вывод:
+```
+17  main    5432 online,recovery postgres ...
+```
+
+### 7.10. Проверить репликацию
+
+На primary (appuse):
+
+```bash
+ssh appuse "sudo -u postgres psql -p 5433 -c \"SELECT client_addr, state, sync_state FROM pg_stat_replication;\""
+```
+
+Должен показать: `127.0.0.1 | streaming | async`
+
+Проверка передачи данных (см. раздел 6).
+
+---
+
 ## Итоговая схема портов
 
 ```
