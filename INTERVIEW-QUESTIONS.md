@@ -353,3 +353,112 @@ SELECT pg_terminate_backend(PID);
 - Снапшоты ZFS / LVM — быстрые, но требуют подготовки ФС
 - `pg_dump --jobs=N` — параллельный дамп (только logical)
 - Для сотен GB–TB: `pgbackrest` или `wal-g`
+
+### 21. Как читать EXPLAIN ANALYZE?
+
+Вывод EXPLAIN ANALYZE читается **изнутри наружу**. Самый вложенный узел —
+первый шаг выполнения. Ключевые поля:
+
+- **Seq Scan** — полное сканирование таблицы (плохо на больших таблицах)
+- **Index Scan** — точечное чтение по индексу (хорошо)
+- **Index Only Scan** — данные только из индекса, без обращения к таблице
+  (отлично)
+- **Bitmap Heap/Index Scan** — комбинация: индекс находит страницы,
+  Bitmap собирает их, читает пачками (хорошо для фильтрации по диапазону)
+- **Nested Loop** — для каждой строки из первого узла ищет во втором
+  (нормально для малого числа строк)
+- **Hash Join** — строит хеш-таблицу одной таблицы, проверяет по ней
+  вторую (лучше для больших объёмов)
+- **Merge Join** — обе таблицы отсортированы, сливает как слияние массивов
+  (редко, только если сортировка уже есть)
+- **rows / actual rows** — оценка vs реальность. Большое расхождение =
+  устаревшая статистика (`ANALYZE`)
+- **actual time** — реальное время (первая цифра — до первой строки,
+  вторая — до последней)
+- **loops** — сколько раз выполнился узел. Если loops > 1 при большом
+  количестве строк — плохо (нужен JOIN, а не подзапрос в цикле)
+
+```sql
+EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM orders WHERE user_id = 42;
+```
+
+### 22. Какие параметры `postgresql.conf` нужно тюнить в первую очередь?
+
+- **shared_buffers** — 15–25% от RAM (но не больше 8–10 GB без тестов)
+- **effective_cache_size** — 50–75% от RAM (подсказка планировщику)
+- **work_mem** — память под сортировку / хеш-таблицы на операцию
+  (осторожно: `max_connections × work_mem` не должно уйти в swap)
+- **maintenance_work_mem** — память для VACUUM, CREATE INDEX, pg_dump
+- **wal_buffers** — 16–64 MB (обычно 16 MB достаточно)
+- **random_page_cost** — 1.1 для SSD, 4.0 для HDD
+- **effective_io_concurrency** — 200 для SSD, 1–2 для HDD
+- **max_worker_processes** — ядра CPU
+- **max_parallel_workers_per_gather** — параллельные запросы (до ядер CPU)
+
+### 23. Что такое VACUUM и зачем он нужен?
+
+VACUUM («вакуум») — сборщик мусора. PostgreSQL хранит несколько версий
+одной строки (MVCC). Старые (мёртвые) версии нужно помечать как свободное
+место, иначе:
+- Таблица раздувается
+- Запросы замедляются (seq scan читает мёртвые строки)
+- Счётчик транзакций (XID) может переполниться — аварийная остановка
+
+```sql
+-- ручной VACUUM (не блокирует чтение/запись)
+VACUUM table_name;
+
+-- полная заморозка старых транзакций (защита от wraparound)
+VACUUM FREEZE table_name;
+
+-- VACUUM + дефрагментация (блокирует таблицу)
+VACUUM FULL table_name;
+```
+
+**Важно:** `VACUUM FULL` блокирует таблицу на запись. В production —
+только если очень нужно и в окно обслуживания.
+
+### 24. Что такое autovacuum и как его настроить?
+
+Autovacuum — автоматический VACUUM, запускается сам. Параметры
+(в `postgresql.conf`):
+
+```ini
+autovacuum = on                     # включён (по умолчанию)
+autovacuum_naptime = 1min           # проверять каждую минуту
+autovacuum_vacuum_threshold = 50    # минимум мёртвых строк для запуска
+autovacuum_vacuum_scale_factor = 0.2  # 20% от размера таблицы
+autovacuum_vacuum_cost_limit = 200  # нагрузка на диск (выше — быстрее)
+autovacuum_vacuum_cost_delay = 2ms  # пауза между операциями
+```
+
+**Проблема:** для больших таблиц 20% — слишком много. Рекомендация:
+```ini
+autovacuum_vacuum_scale_factor = 0.01  # 1%
+autovacuum_vacuum_threshold = 100
+```
+
+### 25. Как контролировать разрастание таблиц?
+
+```sql
+-- топ-10 самых больших таблиц
+SELECT
+  relname AS table_name,
+  pg_size_pretty(pg_total_relation_size(relid)) AS total_size,
+  pg_size_pretty(pg_relation_size(relid)) AS table_size,
+  pg_size_pretty(pg_total_relation_size(relid) - pg_relation_size(relid)) AS index_size,
+  n_live_tup AS live_rows,
+  n_dead_tup AS dead_rows,
+  round(n_dead_tup * 100.0 / GREATEST(n_live_tup + n_dead_tup, 1), 1) AS dead_pct,
+  last_autovacuum,
+  last_autoanalyze
+FROM pg_stat_user_tables
+ORDER BY pg_total_relation_size(relid) DESC
+LIMIT 10;
+```
+
+Что делать, если таблица разрослась:
+- Проверить autovacuum (не отключён ли, успевает ли)
+- Включить `fillfactor` (например, 70 — оставить 30% места под UPDATE)
+- `VACUUM FULL` или `pg_repack` (без блокировок)
+- Проверить, не наплодились ли dead tuples из-за частых UPDATE/DELETE
