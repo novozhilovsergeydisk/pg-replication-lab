@@ -1,8 +1,8 @@
-# Практикум: потоковая репликация PostgreSQL (master → standby)
+# Практикум: физическое резервирование PostgreSQL (primary → standby)
 
-Учебный стенд для отработки **физического резервирования** кластера PostgreSQL
-с одного сервера (мастер, источник) на другой (реплика, standby) через
-**потоковую репликацию** (streaming replication) с физическим слотом и TLS.
+Учебный стенд для отработки **физического резервирования** кластера PostgreSQL.
+Охватывает **потоковую** (streaming) и **файловую** (archive-based) репликацию,
+настройку SSH-туннеля, failover и pg_rewind.
 
 Главная идея — практику можно **повторять сколько угодно раз**: всё крутится в
 отдельном **учебном кластере** (`training`) на отдельном порту (`5433`), который
@@ -185,15 +185,25 @@ sudo ./teardown.sh
 
 ```
 pg-practikum/
-├── README.md               # этот файл
-├── config.env.example      # шаблон конфига (скопировать в config.env)
-├── lib.sh                  # общие функции + предохранители
-├── master/create-master.sh      # создать учебный мастер (роль, слот, TLS, тестовые данные)
-├── master/rewind-old-master.sh  # вернуть старый мастер как реплику через pg_rewind
-├── replica/create-replica.sh    # создать учебную реплику (pg_basebackup + стриминг)
-├── replica/failover.sh          # повысить реплику до primary (учебный failover)
-├── teardown.sh                  # снести учебный кластер на этом сервере
-└── verify.sh                    # показать роль и состояние репликации
+├── README.md                           # этот файл
+├── config.env.example                  # шаблон конфига
+├── lib.sh                              # общие функции
+├── master/create-master.sh             # создать учебный мастер
+├── master/rewind-old-master.sh         # pg_rewind
+├── replica/create-replica.sh           # создать учебную реплику
+├── replica/failover.sh                 # повысить реплику
+├── teardown.sh                         # снести кластер
+├── verify.sh                           # проверка репликации
+│
+├── REPLICATION-GUIDE.md                # полное руководство по streaming replication
+├── ARCHIVE-REPLICATION-GUIDE.md        # файловая репликация
+├── SETUP-PG17-REPLICATION.md           # тренинг: установка PG 17
+├── SSH-TUNNEL.md                       # SSH-туннель + WireGuard
+├── FAILOVER-COMMANDS.md                # команды failover для серверов
+├── INTERVIEW-QUESTIONS.md              # 50 вопросов для собеседования DBA
+├── CICD.md                             # CI/CD через GitHub Actions
+├── pg-quiz.sh                          # интерактивный тест (25 вопросов)
+└── .github/workflows/deploy.yml        # workflow автодеплоя
 ```
 
 ## Диагностика
