@@ -171,7 +171,7 @@ SELECT slot_name, slot_type, active, restart_lsn, xmin FROM pg_replication_slots
   pg_basebackup (потеряете данные, если standby нужен для failover)
 - Ограничить `max_slot_wal_keep_size` (PG 13+)
 
-## 10 других вопросов по PostgreSQL в целом
+## 20 других вопросов по PostgreSQL в целом
 
 ### 1. Что такое autovacuum и почему он важен?
 
@@ -243,3 +243,113 @@ PostgreSQL не обновляет строки in-place, а создаёт но
 Расширение, которое собирает статистику по всем выполняемым запросам:
 количество вызовов, общее время, среднее время, чтение/запись блоков.
 Основной инструмент для поиска медленных запросов в production.
+
+### 11. Какие процессы работают в PostgreSQL?
+
+- **postmaster** — главный процесс (родитель всех остальных)
+- **checkpointer** — записывает dirty buffers на диск
+- **bgwriter** — фоновый writer, сбрасывает страницы
+- **walwriter** — пишет WAL
+- **autovacuum launcher** — запускает autovacuum workers
+- **archiver** — архивирует WAL (если включено)
+- **stats collector** — собирает статистику
+- **logger** — пишет лог (если включён)
+- **walsender** — отправляет WAL standby
+- **walreceiver** — принимает WAL на standby
+- **backend processes** — клиентские подключения (по одному на каждое соединение)
+
+### 12. Как найти медленный запрос?
+
+```sql
+-- через pg_stat_statements (топ-5 по времени):
+SELECT query, calls, total_exec_time, mean_exec_time, rows
+FROM pg_stat_statements
+ORDER BY total_exec_time DESC
+LIMIT 5;
+```
+
+Или включить `log_min_duration_statement` в `postgresql.conf`:
+```ini
+log_min_duration_statement = 1000  -- все запросы дольше 1 сек в лог
+```
+
+### 13. Что такое seq scan и когда это проблема?
+
+Sequential scan — полное сканирование таблицы. Нормально для маленьких
+таблиц (до ~10% от shared_buffers). Проблема — когда seq scan выполняется
+на большой таблице без фильтрации. Лечится индексом.
+
+### 14. Какие способы мониторинга PostgreSQL вы знаете?
+
+- `pg_stat_activity` — текущие подключения и запросы
+- `pg_stat_bgwriter` — активность фоновых процессов
+- `pg_stat_user_tables` — статистика по таблицам (seq scans, idx scans,
+  dead tuples, autovacuum)
+- `pg_locks` — блокировки
+- Расширения: pg_stat_statements, pg_stat_kcache, pg_wait_sampling
+- Внешние: Zabbix, Prometheus + postgres_exporter, Datadog
+
+### 15. Что такое pg_stat_activity?
+
+Системное представление, показывающее все текущие соединения с сервером:
+- `pid` — процесс подключения
+- `state` — `active` / `idle` / `idle in transaction`
+- `query` — выполняемый запрос
+- `wait_event` — на что ждёт (блокировка, IO, сеть)
+- `backend_start` — когда подключился
+
+```sql
+-- найти долгие активные запросы:
+SELECT pid, now() - query_start AS duration, state, query
+FROM pg_stat_activity
+WHERE state = 'active'
+  AND query NOT LIKE '%pg_stat_activity%'
+ORDER BY duration DESC;
+```
+
+### 16. Какие есть типы блокировок в PostgreSQL?
+
+- **Row-level:** `FOR UPDATE`, `FOR NO KEY UPDATE`, `FOR SHARE`,
+  `FOR KEY SHARE`
+- **Table-level:** `ACCESS SHARE` (SELECT), `ROW EXCLUSIVE` (INSERT,
+  UPDATE, DELETE), `ACCESS EXCLUSIVE` (ALTER TABLE, DROP, TRUNCATE)
+- **Deadlock:** PostgreSQL обнаруживает автоматически, прерывает одну
+  из транзакций через `deadlock_timeout`
+
+### 17. Как очистить зависшую блокировку?
+
+```sql
+-- найти кто кого блокирует
+SELECT pg_blocking_pids(pid), wait_event, query
+FROM pg_stat_activity
+WHERE wait_event IS NOT NULL;
+
+-- принудительно завершить процесс
+SELECT pg_terminate_backend(PID);
+```
+
+### 18. Что такое max_connections и как его настроить?
+
+Максимум одновременных клиентских подключений. Каждое соединение = процесс
++ память. Рекомендация:
+- Для 2 GB RAM — 20–50 соединений
+- Для 4 GB RAM — 50–100
+- Лучше поставить PgBouncer (connection pooler) и держать `max_connections`
+  = 100–200, а через PgBouncer пускать тысячи клиентов.
+
+### 19. Что такое PgBouncer?
+
+Лёгкий connection pooler для PostgreSQL. Держит постоянный пул соединений
+с сервером, клиенты подключаются через него. Режимы:
+- **Session pooling** — соединение клиента = соединение с БД
+- **Transaction pooling** — соединение переиспользуется между транзакциями
+  разных клиентов (экономит память)
+- **Statement pooling** — самое агрессивное переиспользование
+
+### 20. Как сделать резервное копирование большого кластера без простоя?
+
+- `pg_basebackup` — физическая копия на лету, без блокировок
+- WAL-архивация + периодический pg_basebackup — PITR до секунды
+- Снапшоты ZFS / LVM — быстрые, но требуют подготовки ФС
+- `pg_dump --jobs=N` — параллельный дамп (только logical)
+- Для сотен GB–TB: `pgbackrest` или `wal-g`
