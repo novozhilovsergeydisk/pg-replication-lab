@@ -133,7 +133,45 @@ host replication user ip/32 md5
 
 ---
 
-## 5 других вопросов по PostgreSQL в целом
+### 21. Как настроить репликацию с нуля, если primary уже работает?
+
+Изменить `wal_level = replica`, `max_wal_senders = 5` (требует рестарта),
+добавить строку в `pg_hba.conf`, перезагрузить, создать пользователя
+`replicator`, снять `pg_basebackup` на standby, создать `standby.signal`,
+указать `primary_conninfo`, запустить standby.
+
+### 22. Что такое timeline switch и когда он происходит?
+
+При `pg_ctlcluster promote` создаётся новый timeline. Нужен, чтобы отличать
+WAL, записанный до promote, от WAL после promote. Без `pg_rewind` старый
+primary не сможет подключиться к новому — у него «прошлый» timeline.
+
+### 23. Можно ли подключиться к standby для записи?
+
+Нет. Физический standby всегда read-only. Попытка INSERT/UPDATE/DELETE
+вернёт ошибку: `cannot execute INSERT in a read-only transaction`.
+Исключение — logical replication, но это другая технология.
+
+### 24. Как проверить, что слот репликации активен?
+
+```sql
+SELECT slot_name, slot_type, active, restart_lsn, xmin FROM pg_replication_slots;
+```
+
+- `active = t` — слот используется подключённым standby
+- `active = f` — standby отключился, WAL не удаляется (следить!)
+- `restart_lsn` — позиция WAL, которую standby уже подтвердил
+
+### 25. Что делать, если слот репликации разросся?
+
+Если standby отключён надолго — слот удерживает WAL. Диск на primary может
+заполниться. Варианты:
+- Подключить standby и дать догнаться
+- Удалить слот (`pg_drop_replication_slot`) и пересоздать standby через
+  pg_basebackup (потеряете данные, если standby нужен для failover)
+- Ограничить `max_slot_wal_keep_size` (PG 13+)
+
+## 10 других вопросов по PostgreSQL в целом
 
 ### 1. Что такое autovacuum и почему он важен?
 
